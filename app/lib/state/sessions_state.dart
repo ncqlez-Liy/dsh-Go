@@ -9,7 +9,7 @@ import 'package:shared_preferences/shared_preferences.dart';
 
 import '../companion/companion_state.dart';
 import '../runtime/runtime_state.dart';
-import 'acp_state.dart' show acpClaudeSessionsProvider;
+import 'acp_state.dart' show acpClientFor, acpClaudeSessionsProvider;
 import 'connection_state.dart';
 import 'hosts_state.dart';
 import '../runtime/local_paths.dart';
@@ -627,10 +627,35 @@ class SessionsController extends AsyncNotifier<List<SessionSummary>> {
   /// Creates a session in the workspace the drawer shows (else the default
   /// directory) and returns its id. [autoApprove] false keeps the host's
   /// permission preset even when 自动批准命令 is on (the companion's).
-  Future<String> create({bool autoApprove = true}) async {
+  Future<String> create({bool autoApprove = true, String? backend}) async {
     final conn = ref.read(activeConnectionProvider).value;
     if (conn == null) throw StateError('not connected');
+    // ACP backend（Claude Code 等）不走 `session/create`：它们在 Host 上是
+    // `agent.acp.call('session/new')`，id 需要 `claude:` 前缀做 UI 投影。
+    if (backend != null) return _createAcp(conn, backend);
     return createForConnection(conn, autoApprove: autoApprove, isCurrent: () => true);
+  }
+
+  /// 新建一个 ACP 会话，返回带前缀的展示 id。
+  Future<String> _createAcp(HostConnection conn, String backend) async {
+    final acp = acpClientFor(conn);
+    if (acp == null || !acp.backendAvailable(backend)) {
+      throw DshRemoteException('ACP_WORKSPACE_UNAVAILABLE', 'Host 上的 $backend 后端未就绪');
+    }
+    final workspaceId = await workspaceForNewSession(ref);
+    final registry = ref.read(workspacesProvider);
+    // ACP 需要真实目录（Host 会 realpath 校验），不能只给 workspaceId。
+    final cwd =
+        (workspaceId == null ? null : registry.byId(workspaceId)?.path) ??
+        conn.workingDirectory ??
+        (registry.workspaces.isEmpty ? null : registry.workspaces.first.path);
+    if (cwd == null) {
+      throw const DshRemoteException('ACP_WORKSPACE_UNAVAILABLE', '没有可用工作区');
+    }
+    final created = await acp.createSession(cwd, backend);
+    ref.invalidate(acpClaudeSessionsProvider);
+    unawaited(refresh());
+    return '$backend:${created.sessionId}';
   }
 
   /// Creates for a captured connection. The caller retires its intent through

@@ -337,8 +337,7 @@ class RemoteAcpClient {
   }
 
   /// 读取 ACP 会话历史（走 transfer，返回原始 events）。[sessionId] 为 native id。
-  Future<List<Object?>> loadSessionHistory(String sessionId, String backend) async {
-    final result = asMap(await transferCall('dsh/sessionHistory', {
+  Future<List<Object?>> loadSessionHistory(String sessionId, String backend) async {    final result = asMap(await transferCall('dsh/sessionHistory', {
       'sessionId': nativeAcpId(sessionId),
       'backend': backend,
     }));
@@ -348,9 +347,41 @@ class RemoteAcpClient {
     return List.unmodifiable(events);
   }
 
+  /// 加载会话并取回它的 `configOptions`（模型 / 思考强度）与 `modes`。
+  ///
+  /// `session/load` 会在同一适配器进程里重放历史，所以必须在 [openStream]
+  /// 之前调用：那时还没有订阅者，重放帧不会混进正在渲染的对话。
+  Future<JsonMap> loadSession(String sessionId, String backend) async {
+    final result = asMap(await call('session/load', {
+      'sessionId': nativeAcpId(sessionId),
+      'backend': backend,
+    }));
+    if (result == null) throw const RemoteAcpException('INVALID_SESSION_LOAD');
+    return result;
+  }
+
+  /// 切换会话配置项（Claude：`model`、`effort`）。[sessionId] 为展示 id。
+  Future<JsonMap?> setConfigOption(String sessionId, String configId, String value, String backend) async {
+    return asMap(await call('session/set_config_option', {
+      'sessionId': nativeAcpId(sessionId),
+      'backend': backend,
+      'configId': configId,
+      'value': value,
+    }));
+  }
+
+  /// 切换权限模式。`auto` 模式下 Claude 会发分类器请求，经第三方网关转发
+  /// 会触发计费兼容性警告，因此首次打开会话时切到 `acceptEdits`。
+  Future<void> setMode(String sessionId, String modeId, String backend) async {
+    await call('session/set_mode', {
+      'sessionId': nativeAcpId(sessionId),
+      'backend': backend,
+      'modeId': modeId,
+    });
+  }
+
   /// 新建 ACP 会话，返回 native sessionId。
-  Future<AcpSession> createSession(String cwd, String backend) async {
-    final result = asMap(await call('session/new', {'cwd': cwd, 'backend': backend, 'mcpServers': const <Object?>[]}));
+  Future<AcpSession> createSession(String cwd, String backend) async {    final result = asMap(await call('session/new', {'cwd': cwd, 'backend': backend, 'mcpServers': const <Object?>[]}));
     if (result == null) throw const RemoteAcpException('INVALID_RESPONSE');
     final id = asString(result['sessionId']);
     if (id == null || id.isEmpty) throw const RemoteAcpException('INVALID_RESPONSE');

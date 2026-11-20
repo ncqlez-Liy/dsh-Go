@@ -12,11 +12,13 @@ import 'dart:async';
 import 'dart:convert';
 
 import 'package:dsh_client/dsh_client.dart';
+import 'package:dsh_remote/dsh_remote.dart' show backendFromSessionId;
 import 'package:flutter/widgets.dart' show StringCharacters;
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 
 import '../l10n/l10n.dart';
+import 'acp_state.dart' show acpBackendLabel;
 import 'bots_state.dart';
 import 'hosts_state.dart';
 import 'read_list_cache.dart';
@@ -759,4 +761,62 @@ List<DrawerBlock>? watchDrawerBlocks(WidgetRef ref, {DateTime? now}) {
     now: now ?? ref.watch(drawerClockProvider)(),
     scoped: scope.scoped,
   );
+}
+
+// ── 按 backend 分区 ──────────────────────────────────────────────────────────
+
+/// 抽屉里一个 backend 的区块。`label` 为 null 表示标准 DSH 会话（不加小标题，
+/// 保持原有观感）；ACP backend（Claude Code）有自己的标题，避免两种 agent 的
+/// 对话混在一起。
+class DrawerSection {
+  const DrawerSection({required this.label, required this.blocks});
+
+  final String? label;
+  final List<DrawerBlock> blocks;
+}
+
+/// ACP 会话的展示 id 带 `claude:` 之类前缀，用来和标准会话区分。
+String? sessionBackendOf(SessionSummary s) => backendFromSessionId(s.sessionId);
+
+/// [drawerBlocks] 的按 backend 分区版本：先标准 DSH 会话，再每个 ACP backend
+/// 一段。分组规则（置顶/文件夹/按天）在两段里各自独立计算。
+List<DrawerSection>? watchDrawerSections(WidgetRef ref, {DateTime? now}) {
+  final scope = ref.watch(drawerScopeProvider);
+  if (scope == null) return null;
+  final view = ref.watch(drawerViewProvider);
+  final pinnedIds = ref.watch(workspacesProvider.select((s) => s.pinnedSessionIds));
+  final filter = ref.watch(drawerFilterProvider);
+  final pending = scope.readOnly ? const <String, PendingKind>{} : ref.watch(pendingInteractionsProvider);
+  final unread = scope.readOnly ? const <String>{} : ref.watch(unreadSessionIdsProvider);
+  final createdAt = view.sort == DrawerSort.created
+      ? ref.watch(sessionCreatedProvider)
+      : const <String, DateTime>{};
+  final clock = now ?? ref.watch(drawerClockProvider)();
+  List<DrawerBlock> group(List<SessionSummary> sessions) => drawerBlocks(
+    sessions: sessions,
+    pinnedIds: pinnedIds,
+    view: view,
+    filter: filter,
+    pending: pending,
+    unread: unread,
+    createdAt: createdAt,
+    now: clock,
+    scoped: scope.scoped,
+  );
+
+  final standard = <SessionSummary>[];
+  final byBackend = <String, List<SessionSummary>>{};
+  for (final s in scope.sessions) {
+    final backend = sessionBackendOf(s);
+    if (backend == null) {
+      standard.add(s);
+    } else {
+      byBackend.putIfAbsent(backend, () => []).add(s);
+    }
+  }
+  final sections = <DrawerSection>[DrawerSection(label: null, blocks: group(standard))];
+  for (final entry in byBackend.entries) {
+    sections.add(DrawerSection(label: acpBackendLabel(entry.key), blocks: group(entry.value)));
+  }
+  return sections;
 }

@@ -13,7 +13,9 @@ import 'package:flutter/rendering.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
 import '../../l10n/l10n.dart';
+import '../../state/acp_state.dart' show acpBackendLabel, acpConfigStoreProvider;
 import '../../state/models_state.dart';
+import '../../state/sessions_state.dart' show currentSessionProvider;
 import '../../state/settings_state.dart';
 import '../common/app_sheet.dart';
 import '../common/empty_view.dart';
@@ -26,6 +28,7 @@ import '../common/ui_trace.dart';
 import '../onboarding/api_key_page.dart';
 import '../providers/provider_form_page.dart';
 import '../providers/providers_page.dart';
+import 'acp_model_chip.dart';
 import '../theme/app_icons.dart';
 import '../theme/theme.dart';
 
@@ -72,16 +75,31 @@ class ComposerModelPill extends ConsumerWidget {
     final l10n = context.l10n;
     final theme = Theme.of(context);
     final colors = theme.colorScheme;
-    final catalog = ref.watch(currentModelCatalogProvider);
+    final sessionId = ref.watch(currentSessionProvider);
+    final acpBackend = acpBackendOfSession(sessionId);
+    // ACP 会话（Claude Code 等）的模型来自会话 configOptions，不走 DSH 的模型目录。
+    final isAcp = acpBackend != null && sessionId != null;
+    final acpConfig = isAcp ? ref.watch(acpConfigStoreProvider.select((configs) => configs[sessionId])) : null;
+    final catalog = isAcp ? null : ref.watch(currentModelCatalogProvider);
     final effective = selection ?? catalog?.defaultSelection;
     final effort = effective?.reasoningEffort;
-    final name = modelShortName(effective, catalog);
-    void open() => showModelSheet(context, current: effective, onSelected: onSelected);
+    final acpModelName = acpConfig?.modelName ?? '';
+    final name = isAcp
+        ? (acpModelName.isEmpty ? acpBackendLabel(acpBackend) : acpModelName)
+        : modelShortName(effective, catalog);
+    final effortName = isAcp ? acpConfig?.effortName : (effort == null ? null : effortLabel(effort));
+    void open() {
+      if (isAcp) {
+        showAcpModelSheet(context, ref, sessionId: sessionId, backend: acpBackend);
+      } else {
+        showModelSheet(context, current: effective, onSelected: onSelected);
+      }
+    }
     return Semantics(
       button: true,
       label: [
         l10n.viewModelLabel(name),
-        if (effort != null) l10n.viewModelEffortLabel(effortLabel(effort)),
+        if (effortName != null) l10n.viewModelEffortLabel(effortName),
       ].join(l10n.viewListSeparator),
       excludeSemantics: true,
       onTap: open,
@@ -99,7 +117,7 @@ class ComposerModelPill extends ConsumerWidget {
             widthFactor: 1,
             heightFactor: 1,
             child: Text(
-              effort == null ? name : '$name ${effortLabel(effort)}',
+              effortName == null ? name : '$name $effortName',
               maxLines: 1,
               overflow: TextOverflow.ellipsis,
               style: theme.textTheme.labelMedium?.copyWith(
@@ -139,6 +157,13 @@ class ModelChip extends ConsumerWidget {
 
   @override
   Widget build(BuildContext context, WidgetRef ref) {
+    // ACP 会话（Claude Code 等）的模型来自它自己的 configOptions，不是 DSH 的
+    // 模型目录：换成 ACP 胶囊，否则会显示 DSH 的模型名（例如「V4.1 Flash」）。
+    final sessionId = ref.watch(currentSessionProvider);
+    final backend = acpBackendOfSession(sessionId);
+    if (backend != null && sessionId != null) {
+      return AcpModelChip(sessionId: sessionId, backend: backend, grouped: grouped);
+    }
     final l10n = context.l10n;
     final theme = Theme.of(context);
     final catalog = ref.watch(currentModelCatalogProvider);

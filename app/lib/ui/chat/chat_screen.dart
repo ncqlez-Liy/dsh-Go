@@ -20,6 +20,7 @@ import '../../runtime/runtime_bridge.dart' show RuntimePhase;
 import '../../runtime/runtime_state.dart' show localRuntimeProvider;
 import '../../speech/read_aloud.dart';
 import '../../speech/voice_cloud.dart';
+import '../../state/acp_state.dart' show acpBackendLabel, newChatBackendProvider;
 import '../../state/android_features.dart';
 import '../../state/account_state.dart';
 import '../speech/voice_call_page.dart';
@@ -104,6 +105,7 @@ import 'media/media_format.dart' show chatTitleShown;
 import 'mention/mention_controller.dart';
 import 'mention/mention_picker.dart';
 import 'mention/mention_text_controller.dart';
+import 'acp_model_chip.dart' show NewChatBackendChip, acpBackendOfSession;
 import 'model_sheet.dart';
 import 'slash_palette.dart';
 import 'trajectory_sheet.dart';
@@ -584,7 +586,7 @@ class _ChatScreenState extends ConsumerState<ChatScreen> with WidgetsBindingObse
     try {
       final String sessionId;
       try {
-        sessionId = await ref.read(sessionsProvider.notifier).create();
+        sessionId = await ref.read(sessionsProvider.notifier).create(backend: ref.read(newChatBackendProvider));
       } catch (e) {
         if (ownsCreation()) {
           setState(() => _localError = chatErrorText(e, action: appL10n.chatCreateFailed));
@@ -614,6 +616,9 @@ class _ChatScreenState extends ConsumerState<ChatScreen> with WidgetsBindingObse
         permission: newChatPermissionToApply(ref.read(permissionStateProvider(null)).value, pendingModes.permission),
         model: ref.read(pendingModelProvider),
       );
+      // ACP 会话（Claude Code 等）没有 DSH 的 preset / 权限预设 / 模型目录，
+      // 新建后不能把这些选择发给 Host。
+      final isAcp = acpBackendOfSession(sessionId) != null;
       _draftKey = sessionId;
       _saveDraft();
       if (!ownsCreation() || _draftKey != sessionId) return null;
@@ -629,9 +634,11 @@ class _ChatScreenState extends ConsumerState<ChatScreen> with WidgetsBindingObse
         // The picks move to the session: owed until the Host confirms each.
         ref.read(pendingNewChatModesProvider.notifier).clear();
         ref.read(pendingModelProvider.notifier).select(null);
-        ref.read(owedSetupsProvider.notifier).put(host, sessionId, setup);
-        if (!ownsCreation()) return null;
-        if (!await _applyOwedSetup(host, sessionId, setup, ownsCreation)) return null;
+        if (!isAcp) {
+          ref.read(owedSetupsProvider.notifier).put(host, sessionId, setup);
+          if (!ownsCreation()) return null;
+          if (!await _applyOwedSetup(host, sessionId, setup, ownsCreation)) return null;
+        }
       }
       if (!ownsCreation() || _draftKey != sessionId || ref.read(currentSessionProvider) != sessionId) return null;
       return sessionId;
@@ -1954,10 +1961,13 @@ class _ChatScreenState extends ConsumerState<ChatScreen> with WidgetsBindingObse
                         status: status,
                         detail: !narrow || isChild
                             ? null
-                            : folderLabel(
-                                ref.watch(
-                                  sessionsProvider.select(
-                                    (s) => s.value?.where((session) => session.sessionId == sessionId).firstOrNull?.cwd,
+                            : _acpDetail(
+                                backend: acpBackendOfSession(sessionId),
+                                folder: folderLabel(
+                                  ref.watch(
+                                    sessionsProvider.select(
+                                      (s) => s.value?.where((session) => session.sessionId == sessionId).firstOrNull?.cwd,
+                                    ),
                                   ),
                                 ),
                               ),
@@ -1979,10 +1989,14 @@ class _ChatScreenState extends ConsumerState<ChatScreen> with WidgetsBindingObse
                         // A new chat's title is only 「新对话」, so the model takes the
                         // header's right like on a wide window — picked before typing,
                         // once there is an engine to send to.
+                        // 新对话时这里选 agent（DSH / Claude Code）；ACP 会话的
+                        // 模型胶囊自己会读 ACP 配置，不再走 DSH 的模型目录。
                         trailing: narrow && (sessionId != null || !connected)
                             ? null
+                            : sessionId == null
+                            ? const NewChatBackendChip(grouped: true)
                             : ModelChip(
-                                selection: sessionId == null ? pendingModel : chat?.model,
+                                selection: chat?.model,
                                 onSelected: _modelTarget(),
                                 grouped: true,
                               ),
@@ -2670,4 +2684,13 @@ class _ChatScaler extends TextScaler {
 
   @override
   int get hashCode => Object.hash(base, factor);
+}
+
+/// 副标题：ACP 会话先标出后端（如 Claude Code），再接工作区名，
+/// 让 DSH 与 Claude 的会话在标题栏也能一眼区分。
+String? _acpDetail({required String? backend, required String? folder}) {
+  final label = backend == null ? null : acpBackendLabel(backend);
+  if (label == null) return folder;
+  if (folder == null || folder.isEmpty) return label;
+  return '$label · $folder';
 }

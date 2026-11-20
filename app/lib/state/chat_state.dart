@@ -10,7 +10,7 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 import '../diagnostics/app_error_log.dart';
 import '../l10n/l10n.dart';
 import '../usage/usage_stats.dart';
-import 'acp_state.dart' show acpClaudeSessionsProvider;
+import 'acp_state.dart' show AcpSessionConfig, acpClaudeSessionsProvider, acpConfigStoreProvider;
 import 'attachments.dart';
 import 'chat_error_text.dart';
 import 'connection_state.dart';
@@ -1071,6 +1071,27 @@ class ChatController extends Notifier<ChatState> {
       title: state.title ?? _sessionTitle() ?? '',
     );
     final title = bridge.title;
+
+    // 读一次 configOptions / modes：Claude 的模型目录和权限模式只有
+    // session/load 才带回来（适配器不实现 dsh/sessionModels）。
+    // 必须放在 openStream 之前——load 会重放历史帧，此时还没有订阅者。
+    try {
+      final loaded = await acp.loadSession(sessionId, backend);
+      if (!current()) return;
+      final config = AcpSessionConfig.parse(loaded)?.withBackendFallback(backend);
+      if (config != null) {
+        ref.read(acpConfigStoreProvider.notifier).put(sessionId, config);
+      }
+      // auto 模式下 Claude 会发分类器请求，经第三方网关转发会触发计费兼容性
+      // 警告，所以首次打开会话时切到 acceptEdits（不改变交互行为）。
+      if (config?.modeId == 'auto') {
+        await acp.setMode(sessionId, 'acceptEdits', backend);
+      }
+    } catch (error, stack) {
+      // 配置读取失败不影响对话本身（例如会话正被另一台设备持有）。
+      appErrorLog.record(AppErrorSource.session, error, stack);
+    }
+    if (!current()) return;
 
     // Load durable history once so the transcript is not empty on open.
     // Each history row is {event: {type, seq, time, data}}; inner event is a
@@ -2213,6 +2234,9 @@ class ChatController extends Notifier<ChatState> {
 
   /// Switches the model for this session (takes effect on the next request).
   Future<bool> setModel(ModelSelection selection) async {
+    // ACP 会话的模型走 `session/set_config_option`（见 AcpModelChip），
+    // 这里的 DSH 模型目录对它无效。
+    if (_isAcp) return false;
     final owner = ref;
     if (!owner.mounted) return false;
     final client = _client;

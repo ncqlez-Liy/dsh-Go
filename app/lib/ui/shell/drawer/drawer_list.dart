@@ -54,8 +54,9 @@ class DrawerConversationList extends ConsumerWidget {
   @override
   Widget build(BuildContext context, WidgetRef ref) {
     final l10n = context.l10n;
-    final blocks = watchDrawerBlocks(ref, now: now);
-    if (blocks == null) return const SizedBox.shrink();
+    final sections = watchDrawerSections(ref, now: now);
+    if (sections == null) return const SizedBox.shrink();
+    final blocks = [for (final section in sections) ...section.blocks];
     final selection = ref.watch(drawerSelectionProvider);
     final selecting = !readOnly && selection != null;
     final filter = ref.watch(drawerFilterProvider);
@@ -113,7 +114,15 @@ class DrawerConversationList extends ConsumerWidget {
       add(key, (_) => KeyedSubtree(key: key, child: leading!));
     }
     var foldersLabelled = false;
-    for (final block in blocks) {
+    // 每个 backend（Claude Code 等）单独成段，段前给小标题，避免和 DSH 的
+    // 对话混在一起。段内仍然沿用置顶/文件夹/按天的分组。
+    for (final section in sections) {
+      final label = section.label;
+      if (label != null && section.blocks.any((b) => b.items.isNotEmpty)) {
+        final key = ValueKey('backend-$label');
+        add(key, (_) => DrawerEyebrow(label, key: key));
+      }
+      for (final block in section.blocks) {
       switch (block) {
         case FilteredBlock(filter: final matching, :final items) when items.isEmpty:
           const key = ValueKey('filter-empty');
@@ -156,6 +165,7 @@ class DrawerConversationList extends ConsumerWidget {
           final key = ValueKey('day-${day.name}');
           add(key, (_) => DrawerEyebrow(sessionDayLabels[day]!, key: key));
           addSessions(items);
+        }
       }
     }
     // Preserve keyed row/folder state when pinning, sorting or hiding the
