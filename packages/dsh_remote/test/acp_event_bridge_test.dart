@@ -30,6 +30,15 @@ void main() {
       expect(bridge.backend, 'claude');
     });
 
+    test('titleEvent 补一条标准 session/title 事件且 seq 递增', () {
+      final bridge = AcpEventBridge(sessionId: 'claude:c1', now: now);
+      final event = bridge.titleEvent('问候');
+      expect(event, isA<TitleChangedEvent>());
+      expect((event as TitleChangedEvent).title, '问候');
+      expect(event.seq, 0);
+      expect(bridge.titleEvent('再改').seq, 1);
+    });
+
     test('initialSnapshot 提供标题投影与空事件', () {
       final bridge = AcpEventBridge(sessionId: 'claude:c1', title: '问候', cwd: 'E:\\work', now: now);
       final snap = bridge.initialSnapshot();

@@ -10,6 +10,7 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 import '../diagnostics/app_error_log.dart';
 import '../l10n/l10n.dart';
 import '../usage/usage_stats.dart';
+import 'acp_state.dart' show acpClaudeSessionsProvider;
 import 'attachments.dart';
 import 'chat_error_text.dart';
 import 'connection_state.dart';
@@ -990,8 +991,7 @@ class ChatController extends Notifier<ChatState> {
 
   /// 会话标题：ACP 会话的标题只存在于会话列表里（Host 侧 dsh/sessionList），
   /// 不在 session/follow 快照中，所以从列表投影里捞一次。
-  String? _sessionTitle() {
-    final rows = ref.read(sessionsProvider).value;
+  String? _sessionTitle() {    final rows = ref.read(sessionsProvider).value;
     if (rows == null) return null;
     for (final row in rows) {
       if (row.sessionId == sessionId) {
@@ -999,6 +999,23 @@ class ChatController extends Notifier<ChatState> {
         if (title != null && title.trim().isNotEmpty) return title;
         return null;
       }
+    }
+    return null;
+  }
+
+  /// 等会话目录真正加载好再取标题（首屏时列表可能还在加载）。
+  Future<String?> _catalogTitle() async {
+    final cached = _sessionTitle();
+    if (cached != null) return cached;
+    try {
+      final rows = await ref.read(acpClaudeSessionsProvider.future);
+      for (final row in rows) {
+        if (row.sessionId != sessionId) continue;
+        final title = row.title;
+        if (title != null && title.trim().isNotEmpty) return title;
+      }
+    } catch (error, stack) {
+      appErrorLog.record(AppErrorSource.session, error, stack);
     }
     return null;
   }
@@ -1053,6 +1070,7 @@ class ChatController extends Notifier<ChatState> {
       sessionId: sessionId,
       title: state.title ?? _sessionTitle() ?? '',
     );
+    final title = bridge.title;
 
     // Load durable history once so the transcript is not empty on open.
     // Each history row is {event: {type, seq, time, data}}; inner event is a
@@ -1097,6 +1115,14 @@ class ChatController extends Notifier<ChatState> {
         );
         // Snapshot first: the shared handler marks the controller synchronized.
         _acpEvents!.add(bridge.initialSnapshot(events: history));
+        // 标题补正：打开会话时列表可能还没加载完，稍后从会话目录里再捞一次。
+        if (title.isEmpty) {
+          unawaited(() async {
+            final resolved = await _catalogTitle();
+            if (resolved == null || resolved.isEmpty || !current()) return;
+            _acpEvents?.add(bridge.titleEvent(resolved));
+          }());
+        }
         // Incremental assistant text arrives on the ACP stream. If the Host
         // closes the stream, reopen it so streaming can recover.
         var reopenScheduled = false;

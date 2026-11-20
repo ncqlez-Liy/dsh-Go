@@ -62,6 +62,18 @@ class AcpEventBridge {
     if (maxTurn + 1 > _turn) _turn = maxTurn + 1;
   }
 
+  /// ACP 会话的标题只存在于 Host 的会话目录（`dsh/sessionList`）里，
+  /// 不在 `session/update` 帧中；拿到后补一条标准标题事件，让头部显示真实标题。
+  SessionLogEvent titleEvent(String value) => SessionLogEvent.fromJson(<String, Object?>{
+        'seq': _seq++,
+        'time': _now.toIso8601String(),
+        'type': 'session/title',
+        'data': <String, Object?>{
+          'title': value,
+          'source': <String, Object?>{'kind': 'provider'},
+        },
+      });
+
   /// 首屏基线：durable log + 标题投影。ChatTranscript 应用后置 `_synchronized`。
   SessionSnapshotEvent initialSnapshot({List<SessionLogEvent> events = const <SessionLogEvent>[]}) =>
       SessionSnapshotEvent(
