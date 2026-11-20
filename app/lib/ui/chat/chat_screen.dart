@@ -2271,7 +2271,7 @@ class _ChatScreenState extends ConsumerState<ChatScreen> with WidgetsBindingObse
                                         ? l10n.commonWaitingAnswer
                                         : null,
                                     placeholder: generate == null
-                                        ? null
+                                        ? _acpPlaceholder(sessionId, l10n.chatComposerHint)
                                         : _editing && !generate.isVideo
                                         ? l10n.mediaHintEdit
                                         : generate.isVideo
@@ -2693,4 +2693,14 @@ String? _acpDetail({required String? backend, required String? folder}) {
   if (label == null) return folder;
   if (folder == null || folder.isEmpty) return label;
   return '$label · $folder';
+}
+
+/// ACP 会话的输入框提示：把「给 DSH 发消息…」里的品牌名换成对应后端，
+/// 避免在 Claude 会话里还写着 DSH。
+String _acpPlaceholder(String? sessionId, String fallback) {
+  final backend = acpBackendOfSession(sessionId);
+  if (backend == null) return fallback;
+  final label = acpBackendLabel(backend);
+  if (label.isEmpty || !fallback.contains('DSH')) return fallback;
+  return fallback.replaceFirst('DSH', label);
 }
