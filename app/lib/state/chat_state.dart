@@ -482,6 +482,8 @@ class ChatController extends Notifier<ChatState> {
 
   String? get _acpBackend => backendFromSessionId(sessionId);
   bool get _isAcp => _acpBackend != null;
+  static const int _acpMaxRetries = 3;
+  int _acpRetries = 0;
   Timer? _flush;
   Timer? _stopTimeout;
   _ChatOperation? _stoppingOperation;
@@ -664,7 +666,10 @@ class ChatController extends Notifier<ChatState> {
       if (connection != DshConnectionState.connected) _markSyncing();
       final stopping = _stoppingOperation;
       if (stopping != null && !_currentOperation(stopping)) _endStopping();
-      if (connection == DshConnectionState.connected && _watchEnded) {
+      if (connection == DshConnectionState.connected &&
+          (_watchEnded || (_isAcp && !_synchronized))) {
+        // ACP 会话没有 Host 侧 follow 流可依赖：短暂断线后
+        // `_markSyncing()` 会把状态压在「同步中」，必须主动重订阅才能恢复。
         if (_isAcp) {
           unawaited(_listenAcp(client, pulse));
         } else {
@@ -785,7 +790,15 @@ class ChatController extends Notifier<ChatState> {
     final owner = ref;
     final attempt = _resyncOwner = Object();
     state = state.copyWith(resyncing: true);
-    _listen(client, ref.read(runPulseProvider(sessionId)));
+    final pulse = ref.read(runPulseProvider(sessionId));
+    if (_isAcp) {
+      // ACP 会话不在标准 session 注册表里，重新同步也必须走 ACP 专用监听，
+      // 否则标准 watch 会因 session/not-found 直接失败。
+      _acpRetries = 0;
+      unawaited(_listenAcp(client, pulse));
+    } else {
+      _listen(client, pulse);
+    }
     final listener = _listenOwner;
     if (client.mux.state != DshConnectionState.connected) client.mux.reconnect();
     final ready = _syncReady.future;
@@ -958,6 +971,8 @@ class ChatController extends Notifier<ChatState> {
     // The stopped turn is over, even when what waited in the inbox
     // starts the next one at once (running never reads false).
     if (event is TurnEndedEvent && state.stopping) _endStopping();
+    // ACP 的一轮由终止帧收口；此时才允许发送下一条。
+    if (_isAcp && event is TurnEndedEvent) _acpSending = false;
     _trackApprovals(event);
     if (event is SessionSnapshotEvent) {
       // A replacement transcript may have the same sequence bounds.
@@ -971,6 +986,21 @@ class ChatController extends Notifier<ChatState> {
     } else if (changed) {
       _schedule();
     }
+  }
+
+  /// 会话标题：ACP 会话的标题只存在于会话列表里（Host 侧 dsh/sessionList），
+  /// 不在 session/follow 快照中，所以从列表投影里捞一次。
+  String? _sessionTitle() {
+    final rows = ref.read(sessionsProvider).value;
+    if (rows == null) return null;
+    for (final row in rows) {
+      if (row.sessionId == sessionId) {
+        final title = row.title;
+        if (title != null && title.trim().isNotEmpty) return title;
+        return null;
+      }
+    }
+    return null;
   }
 
   /// Subscribe to an ACP (Claude Code, etc.) session. Reads its history once
@@ -996,27 +1026,40 @@ class ChatController extends Notifier<ChatState> {
     if (backend == null) return;
     final carrier = client.carrier;
     if (carrier is! RemoteTunnelCarrier || carrier.session == null) {
+      _watchEnded = true;
+      _markSyncing();
+      if (!_syncReady.isCompleted) _syncReady.complete(false);
+      // build() 期间 state 未初始化，延后一帧再写入错误状态。
+      await Future<void>.value();
       if (current()) {
-        _watchEnded = true;
-        _markSyncing();
-        if (!_syncReady.isCompleted) _syncReady.complete(false);
         state = state.copyWith(error: 'ACP host unavailable', syncError: 'ACP host unavailable', streamLost: true, loading: false);
+      }
+      // 断线重连期间 carrier 可能还没有 session：稍后重试，
+      // 否则状态会永久停在「同步中」（`_watchEnded` 已置真，重连事件会再来）。
+      if (_acpRetries < _acpMaxRetries && owner.mounted && identical(client, _client)) {
+        _acpRetries += 1;
+        Timer(Duration(seconds: 2 * _acpRetries), () {
+          if (owner.mounted && identical(client, _client)) unawaited(_listenAcp(client, pulse));
+        });
       }
       return;
     }
 
     final acp = _acp = RemoteAcpClient(carrier.session!);
+    // build() 还没返回时 provider state 尚未初始化，先让出一次微任务再读标题。
+    await Future<void>.value();
+    if (!current()) return;
     final bridge = _acpBridge = AcpEventBridge(
       sessionId: sessionId,
-      title: state.title ?? '',
+      title: state.title ?? _sessionTitle() ?? '',
     );
 
     // Load durable history once so the transcript is not empty on open.
     // Each history row is {event: {type, seq, time, data}}; inner event is a
     // standard SessionWireEvent we can hand straight to SessionLogEvent.fromJson.
+    var history = <SessionLogEvent>[];
     try {
       final rawHistory = await acp.loadSessionHistory(nativeAcpId(sessionId), backend);
-      final history = <SessionLogEvent>[];
       for (final row in rawHistory) {
         final map = row is Map ? row : null;
         final inner = map?['event'] ?? row;
@@ -1025,6 +1068,12 @@ class ChatController extends Notifier<ChatState> {
       }
       history.sort((a, b) => a.seq.compareTo(b.seq));
       bridge.adoptHistory(history);
+    } catch (error, stack) {
+      // 历史拉取失败不应阻塞会话打开：退化为空历史，live 帧仍可继续。
+      appErrorLog.record(AppErrorSource.session, error, stack);
+      history = <SessionLogEvent>[];
+    }
+    try {
       if (current()) {
         _acpEvents = StreamController<DshEvent>.broadcast(sync: true);
         _sub = _acpEvents!.stream.listen(
@@ -1072,6 +1121,9 @@ class ChatController extends Notifier<ChatState> {
         if (!current()) {
           unawaited(_acpStream?.close());
           _acpStream = null;
+        } else {
+          // 订阅成功，清空重试计数。
+          _acpRetries = 0;
         }
       }
     } catch (e, stack) {
@@ -1082,6 +1134,15 @@ class ChatController extends Notifier<ChatState> {
       appErrorLog.record(AppErrorSource.session, e, stack);
       final message = chatErrorText(e, action: appL10n.stateChatSyncInterrupted);
       state = state.copyWith(error: message, syncError: message, streamLost: true, loading: false);
+      // 订阅失败常常是瞬时的（例如会话所有权被另一台设备短暂持有、Host 刚重启）。
+      // 做有限次退避重试，让会话无需用户手动「重新同步」也能自愈。
+      if (_acpRetries < _acpMaxRetries) {
+        _acpRetries += 1;
+        final delay = Duration(seconds: 2 * _acpRetries);
+        Timer(delay, () {
+          if (owner.mounted && identical(client, _client)) unawaited(_listenAcp(client, pulse));
+        });
+      }
     }
   }
 
@@ -1750,23 +1811,20 @@ class ChatController extends Notifier<ChatState> {
           throw DshRemoteException('ACP_BUSY', '上一条 Claude 消息仍在生成，请稍后再发');
         }
         _acpSending = true;
-        var turnFailed = false;
+        for (final event in bridge.beginTurn(content, requestId: requestId)) {
+          events.add(event);
+        }
         try {
-          for (final event in bridge.beginTurn(content, requestId: requestId)) {
-            events.add(event);
-          }
-          try {
-            await acp.prompt(sessionId, content, backend);
-          } on Object {
-            turnFailed = true;
-            rethrow;
-          }
-        } finally {
-          // 无论成功或失败都要收口，否则 transcript 的 running 永久为真。
-          for (final event in bridge.endTurn(failed: turnFailed)) {
+          // Host 的 session/prompt 只负责把这一轮丢到后台跑并立即返回；
+          // 真正的结束信号是流里的 prompt_completed / prompt_failed 帧，
+          // 由 AcpEventBridge 收口。这里仅在调用本身失败时兜底收口。
+          await acp.prompt(sessionId, content, backend);
+        } catch (_) {
+          for (final event in bridge.endTurn(failed: true)) {
             events.add(event);
           }
           _acpSending = false;
+          rethrow;
         }
         return;
       }

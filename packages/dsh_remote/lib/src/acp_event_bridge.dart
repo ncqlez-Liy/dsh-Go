@@ -40,15 +40,26 @@ class AcpEventBridge {
   int _turn = 1;
   int _chunkIndex = 0;
   bool _streaming = false;
+  bool _turnOpen = false;
   String _attemptId = '';
   final StringBuffer _assistantText = StringBuffer();
   final StringBuffer _reasoningText = StringBuffer();
 
-  /// 加载历史后调用：把内部 seq 推到历史末尾之后，避免 live 帧与历史 seq 冲突。
+  /// 加载历史后调用：把内部 seq / turn 推到历史末尾之后，避免 live 帧与
+  /// 历史事件在 transcript 里交错（turn 号重复会让新消息插到旧消息中间）。
   void adoptHistory(List<SessionLogEvent> history) {
+    var maxTurn = 0;
     for (final event in history) {
       if (event.seq >= _seq) _seq = event.seq + 1;
+      switch (event) {
+        case TurnStartedEvent(:final turn):
+        case TurnEndedEvent(:final turn):
+          if (turn > maxTurn) maxTurn = turn;
+        default:
+          break;
+      }
     }
+    if (maxTurn + 1 > _turn) _turn = maxTurn + 1;
   }
 
   /// 首屏基线：durable log + 标题投影。ChatTranscript 应用后置 `_synchronized`。
@@ -72,6 +83,7 @@ class AcpEventBridge {
 
   /// 发送前调用：合成 turn/start + user/message，让 UI 立刻显示正在生成。
   List<DshEvent> beginTurn(String text, {String? requestId}) {
+    _turnOpen = true;
     final startSeq = _seq++;
     final userSeq = _seq++;
     return [
@@ -88,7 +100,7 @@ class AcpEventBridge {
           ],
           'source': {
             'kind': 'user',
-            if (requestId != null) 'rpcId': requestId,
+            'rpcId': ?requestId,
           },
         }),
       ),
@@ -96,10 +108,11 @@ class AcpEventBridge {
   }
 
   /// 收到一帧 `agent.acp.frame`（`{method, params}`）；返回 0..N 个 DSH 事件。
-  List<DshEvent> onFrame(AcpFrame frame) {
-    final method = asString(frame.frame['method']) ?? '';
-    if (method != 'session/update') return const <DshEvent>[];
-    final params = asMap(frame.frame['params']);
+  List<DshEvent> onFrame(AcpFrame frame) => _onFrameMap(frame.frame);
+
+  List<DshEvent> _onFrameMap(Map<String, Object?> frame) {
+    if ((asString(frame['method']) ?? '') != 'session/update') return const <DshEvent>[];
+    final params = asMap(frame['params']);
     if (params == null) return const <DshEvent>[];
     // ACP 通知形如 {sessionId, update:{sessionUpdate, content}}。
     final update = asMap(params['update']) ?? params;
@@ -114,6 +127,7 @@ class AcpEventBridge {
       case 'agent_message':
         final text = _extractText(update['content']);
         if (text.isEmpty) break;
+        _ensureTurn(out);
         if (!_streaming) out.add(_startStream());
         _assistantText.write(text);
         out.add(AssistantChunkEvent(
@@ -128,6 +142,7 @@ class AcpEventBridge {
       case 'agent_thought':
         final text = _extractText(update['content']);
         if (text.isEmpty) break;
+        _ensureTurn(out);
         if (!_streaming) out.add(_startStream());
         _reasoningText.write(text);
         out.add(AssistantChunkEvent(
@@ -137,6 +152,24 @@ class AcpEventBridge {
           time: _now,
           chunk: ReasoningDeltaChunk(1, text),
         ));
+        break;
+      // Host 在一轮结束时补发终止帧：prompt_completed / prompt_failed。
+      // catchUp 是本轮全部帧的副本，只在「实时帧一帧都没收到」时补放，
+      // 否则正文会被渲染两遍（官方客户端同样是 catchUp 仅作兜底）。
+      case 'prompt_completed':
+      case 'prompt_failed':
+        // 没有打开的 turn 说明这一轮已经收口（重复终止帧），直接忽略，
+        // 否则会把 catchUp 再放一遍造成重复气泡。
+        if (!_turnOpen) break;
+        final lostLive = !_streaming && _assistantText.isEmpty && _reasoningText.isEmpty;
+        final catchUp = update['catchUp'];
+        if (lostLive && catchUp is List) {
+          for (final item in catchUp) {
+            final map = asMap(item);
+            if (map != null) out.addAll(_onFrameMap(map));
+          }
+        }
+        out.addAll(endTurn(failed: kind == 'prompt_failed'));
         break;
       // 用户消息在 beginTurn 里已合成，忽略 ACP 回传避免重复气泡。
       case 'user_message_chunk':
@@ -150,6 +183,14 @@ class AcpEventBridge {
         break;
     }
     return out;
+  }
+
+  /// 没有 beginTurn（例如别处发起的 turn）时也要有 turn/start，否则
+  /// transcript 的 running/turn 归属会错乱。
+  void _ensureTurn(List<DshEvent> out) {
+    if (_turnOpen) return;
+    _turnOpen = true;
+    out.add(TurnStartedEvent(_seq++, _now, const <String, Object?>{}, turn: _turn));
   }
 
   AssistantStreamStarted _startStream() {
@@ -167,9 +208,12 @@ class AcpEventBridge {
     );
   }
 
-  /// prompt 返回后调用：把累积文本落成 durable assistant/message，关闭 stream，
-  /// 并写 turn/end。[failed] 时 reason 为 error。
+  /// prompt 结束时调用：把累积文本落成 durable assistant/message，关闭 stream，
+  /// 并写 turn/end。[failed] 时 reason 为 error。turn 已关闭时返回空列表，
+  /// 避免 terminate 帧与本地收口重复结束同一轮。
   List<DshEvent> endTurn({bool failed = false}) {
+    if (!_turnOpen && !_streaming) return const <DshEvent>[];
+    _turnOpen = false;
     final out = <DshEvent>[];
     if (_streaming) {
       final text = _assistantText.toString();

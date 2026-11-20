@@ -1,7 +1,6 @@
 // SPDX-FileCopyrightText: 2026 DSH Remote contributors
 // SPDX-License-Identifier: MIT
 // See THIRD_PARTY_NOTICES.md.
-import 'package:dsh_client/dsh_client.dart';
 import 'package:dsh_remote/dsh_remote.dart';
 import 'package:test/test.dart';
 
@@ -54,17 +53,92 @@ void main() {
       expect(user.message.source.isHuman, isTrue);
     });
 
-    test('agent_message_chunk 首帧带 stream started，之后仅 chunk', () {
+    test('没有 beginTurn 时，首个 chunk 先补 turn/start 再开 stream', () {
       final bridge = AcpEventBridge(sessionId: 'claude:c1', now: now);
       final first = bridge.onFrame(_chunk('你'));
-      expect(first, hasLength(2));
-      expect(first[0], isA<AssistantStreamStarted>());
-      expect(first[1], isA<AssistantChunkEvent>());
-      expect((first[1] as AssistantChunkEvent).chunk, isA<TextDeltaChunk>());
-      expect(((first[1] as AssistantChunkEvent).chunk as TextDeltaChunk).text, '你');
+      expect(first, hasLength(3));
+      expect(first[0], isA<TurnStartedEvent>());
+      expect(first[1], isA<AssistantStreamStarted>());
+      expect(first[2], isA<AssistantChunkEvent>());
+      expect((first[2] as AssistantChunkEvent).chunk, isA<TextDeltaChunk>());
+      expect(((first[2] as AssistantChunkEvent).chunk as TextDeltaChunk).text, '你');
       final second = bridge.onFrame(_chunk('好'));
       expect(second, hasLength(1));
       expect(second[0], isA<AssistantChunkEvent>());
+    });
+
+    test('prompt_completed 终止帧收口一轮并补放 catchUp', () {
+      final bridge = AcpEventBridge(sessionId: 'claude:c1', now: now);
+      final all = <DshEvent>[];
+      all.addAll(bridge.beginTurn('问题'));
+      // 本轮实时帧全部丢失，只有终止帧带着 catchUp 回来。
+      final terminal = AcpFrame(streamId: 's1', frame: {
+        'method': 'session/update',
+        'params': {
+          'sessionId': 'c1',
+          'update': {
+            'sessionUpdate': 'prompt_completed',
+            'stopReason': 'end_turn',
+            'catchUp': [
+              {
+                'method': 'session/update',
+                'params': {
+                  'sessionId': 'c1',
+                  'update': {
+                    'sessionUpdate': 'agent_message_chunk',
+                    'content': [
+                      {'type': 'text', 'text': '补放的正文'},
+                    ],
+                  },
+                },
+              },
+            ],
+          },
+        },
+      });
+      all.addAll(bridge.onFrame(terminal));
+      expect(all.whereType<TurnStartedEvent>(), hasLength(1));
+      expect(all.whereType<AssistantChunkEvent>(), hasLength(1));
+      final assistant = all.whereType<AssistantMessageEvent>().single;
+      expect(assistant.message.text, '补放的正文');
+      expect(all.whereType<TurnEndedEvent>(), hasLength(1));
+      // 收口后再来终止帧不应重复结束同一轮。
+      expect(bridge.onFrame(terminal), isEmpty);
+    });
+
+    test('实时帧已收到时，终止帧的 catchUp 不再重复渲染正文', () {
+      final bridge = AcpEventBridge(sessionId: 'claude:c1', now: now);
+      final all = <DshEvent>[];
+      all.addAll(bridge.beginTurn('问题'));
+      all.addAll(bridge.onFrame(_chunk('实时正文')));
+      final terminal = AcpFrame(streamId: 's1', frame: {
+        'method': 'session/update',
+        'params': {
+          'sessionId': 'c1',
+          'update': {
+            'sessionUpdate': 'prompt_completed',
+            'stopReason': 'end_turn',
+            'catchUp': [
+              {
+                'method': 'session/update',
+                'params': {
+                  'sessionId': 'c1',
+                  'update': {
+                    'sessionUpdate': 'agent_message_chunk',
+                    'content': [
+                      {'type': 'text', 'text': '实时正文'},
+                    ],
+                  },
+                },
+              },
+            ],
+          },
+        },
+      });
+      all.addAll(bridge.onFrame(terminal));
+      // 只有实时那一份，catchUp 不应再补一遍。
+      expect(all.whereType<AssistantChunkEvent>(), hasLength(1));
+      expect(all.whereType<AssistantMessageEvent>().single.message.text, '实时正文');
     });
 
     test('thought chunk 生成 reasoning delta', () {
