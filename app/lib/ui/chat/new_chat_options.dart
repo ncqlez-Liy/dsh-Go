@@ -13,6 +13,7 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 
 import '../../l10n/l10n.dart';
 import '../../runtime/runtime_state.dart';
+import '../../state/acp_state.dart' show newChatBackendProvider;
 import '../../state/connection_state.dart';
 import '../../state/features_state.dart';
 import '../../state/models_state.dart' show modelSelectionScopeProvider;
@@ -108,6 +109,9 @@ class NewChatOptions extends ConsumerWidget {
   @override
   Widget build(BuildContext context, WidgetRef ref) {
     final l10n = context.l10n;
+    // ACP 后端（Claude Code 等）没有 DSH 的 Agent 预设、权限预设和文件夹，
+    // 这几项发过去只会被忽略，所以整行不显示。
+    if (ref.watch(newChatBackendProvider) != null) return const SizedBox.shrink();
     final pending = ref.watch(pendingNewChatModesProvider);
 
     final presets = newChatPresets(ref.watch(agentPresetsProvider).value);
