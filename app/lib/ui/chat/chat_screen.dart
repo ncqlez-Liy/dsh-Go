@@ -8,6 +8,7 @@ import 'dart:async';
 import 'dart:math' as math;
 
 import 'package:dsh_client/dsh_client.dart';
+import 'package:dsh_remote/dsh_remote.dart' show AcpWorkspace;
 import 'package:flutter/foundation.dart' show defaultTargetPlatform;
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
@@ -20,7 +21,8 @@ import '../../runtime/runtime_bridge.dart' show RuntimePhase;
 import '../../runtime/runtime_state.dart' show localRuntimeProvider;
 import '../../speech/read_aloud.dart';
 import '../../speech/voice_cloud.dart';
-import '../../state/acp_state.dart' show acpBackendLabel, newChatBackendProvider;
+import '../../state/acp_state.dart'
+    show acpBackendLabel, acpWorkspacesProvider, newChatAcpWorkspaceProvider, newChatBackendProvider;
 import '../../state/android_features.dart';
 import '../../state/account_state.dart';
 import '../speech/voice_call_page.dart';
@@ -105,7 +107,7 @@ import 'media/media_format.dart' show chatTitleShown;
 import 'mention/mention_controller.dart';
 import 'mention/mention_picker.dart';
 import 'mention/mention_text_controller.dart';
-import 'acp_model_chip.dart' show NewChatBackendChip, acpBackendOfSession;
+import 'acp_model_chip.dart' show NewChatBackendChip, acpBackendOfSession, showAcpWorkspaceSheet;
 import 'model_sheet.dart';
 import 'slash_palette.dart';
 import 'trajectory_sheet.dart';
@@ -1883,17 +1885,21 @@ class _ChatScreenState extends ConsumerState<ChatScreen> with WidgetsBindingObse
                                             : context.l10n.shellFolderLabel(newFolder.name),
                                         onFolder: hasFolders ? _pickNewChatFolder : null,
                                       ),
-                                      workspace: workspace != null
+                                      workspace: ref.watch(newChatBackendProvider) == 'claude'
+                                          ? _claudeWorkspaceLabel(ref)
+                                          : workspace != null
                                           ? workspaceTitle(workspace)
                                           : inHostDefault
                                           ? context.l10n.viewEmptyHostDefaultDirectory
                                           : null,
-                                      onWorkspace: () => showWorkspaceSheet(
-                                        context,
-                                        onManage: () =>
-                                            Navigator.of(context)
-                                                .push(MaterialPageRoute<void>(builder: (_) => const WorkspacesPage())),
-                                      ),
+                                      onWorkspace: ref.read(newChatBackendProvider) == 'claude'
+                                          ? () => unawaited(showAcpWorkspaceSheet(context, ref))
+                                          : () => showWorkspaceSheet(
+                                              context,
+                                              onManage: () => Navigator.of(context).push(
+                                                MaterialPageRoute<void>(builder: (_) => const WorkspacesPage()),
+                                              ),
+                                            ),
                                     ),
                                   ],
                                 ),
@@ -2703,4 +2709,21 @@ String _acpPlaceholder(String? sessionId, String fallback) {
   final label = acpBackendLabel(backend);
   if (label.isEmpty || !fallback.contains('DSH')) return fallback;
   return fallback.replaceFirst('DSH', label);
+}
+
+/// 新对话选了 Claude Code 时，空态里显示的是 Claude 的工作区（来自 Host 的
+/// ACP 目录），不是 DSH 的工作区注册表，否则用户看到的是错的目录。
+String? _claudeWorkspaceLabel(WidgetRef ref) {
+  final spaces = ref.watch(acpWorkspacesProvider).value ?? const <AcpWorkspace>[];
+  if (spaces.isEmpty) return null;
+  final chosen = ref.watch(newChatAcpWorkspaceProvider);
+  for (final space in spaces) {
+    if (space.path == chosen) return _spaceLabel(space);
+  }
+  return _spaceLabel(spaces.first);
+}
+
+String _spaceLabel(AcpWorkspace space) {
+  final title = space.title;
+  return title == null || title.isEmpty ? space.path : title;
 }

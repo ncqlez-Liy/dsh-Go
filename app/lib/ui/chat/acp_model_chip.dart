@@ -8,7 +8,7 @@
 library;
 
 import 'package:dsh_client/dsh_client.dart' show DshRemoteException;
-import 'package:dsh_remote/dsh_remote.dart' show RemoteAcpException, backendFromSessionId;
+import 'package:dsh_remote/dsh_remote.dart' show AcpWorkspace, RemoteAcpException, backendFromSessionId;
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
@@ -151,6 +151,54 @@ Future<void> showNewChatBackendSheet(BuildContext context, WidgetRef ref) async 
   );
   if (picked == null) return;
   ref.read(newChatBackendProvider.notifier).select(picked == 'dsh' ? null : picked);
+  if (picked == 'claude') await showAcpWorkspaceSheet(context, ref);
+}
+
+/// 选 Claude 的工作区：清单来自 Host 的 ACP 目录（`dsh/workspaceList`），
+/// 不是 DSH 的工作区注册表——两者是不同的目录集合。
+Future<void> showAcpWorkspaceSheet(BuildContext context, WidgetRef ref) async {
+  var spaces = ref.read(acpWorkspacesProvider).value;
+  if (spaces == null) {
+    try {
+      spaces = await ref.read(acpWorkspacesProvider.future);
+    } on Object {
+      spaces = const <AcpWorkspace>[];
+    }
+  }
+  if (!context.mounted) return;
+  final available = spaces ?? const <AcpWorkspace>[];
+  if (available.isEmpty) {
+    ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('电脑上的 Claude 还没有可用工作区')));
+    return;
+  }
+  final current = ref.read(newChatAcpWorkspaceProvider);
+  final picked = await showModalBottomSheet<String>(
+    context: context,
+    showDragHandle: true,
+    builder: (sheetContext) {
+      final theme = Theme.of(sheetContext);
+      return SafeArea(
+        child: ListView(
+          shrinkWrap: true,
+          children: [
+            Padding(
+              padding: const EdgeInsets.fromLTRB(20, 4, 20, 8),
+              child: Text('Claude Code 工作区', style: theme.textTheme.titleSmall),
+            ),
+            for (final space in available)
+              ListTile(
+                title: Text(space.title == null || space.title!.isEmpty ? space.path : space.title!),
+                subtitle: Text(space.path, style: theme.textTheme.bodySmall),
+                trailing: space.path == current ? const Icon(AppIcons.selected, size: 20) : null,
+                onTap: () => Navigator.of(sheetContext).pop(space.path),
+              ),
+            const SizedBox(height: 8),
+          ],
+        ),
+      );
+    },
+  );
+  if (picked != null) ref.read(newChatAcpWorkspaceProvider.notifier).select(picked);
 }
 
 /// 换 Claude 模型的底部弹层。

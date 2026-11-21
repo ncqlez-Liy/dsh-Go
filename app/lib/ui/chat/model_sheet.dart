@@ -13,7 +13,7 @@ import 'package:flutter/rendering.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
 import '../../l10n/l10n.dart';
-import '../../state/acp_state.dart' show acpBackendLabel, acpConfigStoreProvider;
+import '../../state/acp_state.dart' show acpBackendLabel, acpConfigStoreProvider, newChatBackendProvider;
 import '../../state/models_state.dart';
 import '../../state/sessions_state.dart' show currentSessionProvider;
 import '../../state/settings_state.dart';
@@ -76,10 +76,14 @@ class ComposerModelPill extends ConsumerWidget {
     final theme = Theme.of(context);
     final colors = theme.colorScheme;
     final sessionId = ref.watch(currentSessionProvider);
-    final acpBackend = acpBackendOfSession(sessionId);
+    // 还没建会话时也要认后端选择：新对话选了 Claude Code，胶囊就不能显示 DSH 模型。
+    final draftBackend = ref.watch(newChatBackendProvider);
+    final acpBackend = acpBackendOfSession(sessionId) ?? (sessionId == null ? draftBackend : null);
     // ACP 会话（Claude Code 等）的模型来自会话 configOptions，不走 DSH 的模型目录。
-    final isAcp = acpBackend != null && sessionId != null;
-    final acpConfig = isAcp ? ref.watch(acpConfigStoreProvider.select((configs) => configs[sessionId])) : null;
+    final isAcp = acpBackend != null;
+    final acpConfig = isAcp && sessionId != null
+        ? ref.watch(acpConfigStoreProvider.select((configs) => configs[sessionId]))
+        : null;
     final catalog = isAcp ? null : ref.watch(currentModelCatalogProvider);
     final effective = selection ?? catalog?.defaultSelection;
     final effort = effective?.reasoningEffort;
@@ -90,6 +94,11 @@ class ComposerModelPill extends ConsumerWidget {
     final effortName = isAcp ? acpConfig?.effortName : (effort == null ? null : effortLabel(effort));
     void open() {
       if (isAcp) {
+        if (sessionId == null) {
+          // 模型属于某个 Claude 会话：先发出第一条消息，再回来换。
+          ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('发出第一条消息后才能给这个 Claude 会话换模型')));
+          return;
+        }
         showAcpModelSheet(context, ref, sessionId: sessionId, backend: acpBackend);
       } else {
         showModelSheet(context, current: effective, onSelected: onSelected);

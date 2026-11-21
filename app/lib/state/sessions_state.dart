@@ -3,13 +3,15 @@ import 'dart:collection';
 import 'dart:convert';
 
 import 'package:dsh_client/dsh_client.dart';
+import 'package:dsh_remote/dsh_remote.dart' show AcpWorkspace;
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter/widgets.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 
 import '../companion/companion_state.dart';
 import '../runtime/runtime_state.dart';
-import 'acp_state.dart' show acpClientFor, acpClaudeSessionsProvider;
+import 'acp_state.dart'
+    show acpClientFor, acpClaudeSessionsProvider, acpWorkspacesProvider, newChatAcpWorkspaceProvider;
 import 'connection_state.dart';
 import 'hosts_state.dart';
 import '../runtime/local_paths.dart';
@@ -642,15 +644,23 @@ class SessionsController extends AsyncNotifier<List<SessionSummary>> {
     if (acp == null || !acp.backendAvailable(backend)) {
       throw DshRemoteException('ACP_WORKSPACE_UNAVAILABLE', 'Host 上的 $backend 后端未就绪');
     }
-    final workspaceId = await workspaceForNewSession(ref);
-    final registry = ref.read(workspacesProvider);
-    // ACP 需要真实目录（Host 会 realpath 校验），不能只给 workspaceId。
-    final cwd =
-        (workspaceId == null ? null : registry.byId(workspaceId)?.path) ??
-        conn.workingDirectory ??
-        (registry.workspaces.isEmpty ? null : registry.workspaces.first.path);
-    if (cwd == null) {
-      throw const DshRemoteException('ACP_WORKSPACE_UNAVAILABLE', '没有可用工作区');
+    // ACP 会话落在 Claude 自己的目录集合里，DSH 的工作区注册表对它不适用；
+    // 用户在新对话页选过就用那个，否则用 Host 报上来的第一个 Claude 工作区。
+    var cwd = ref.read(newChatAcpWorkspaceProvider);
+    if (cwd == null || cwd.isEmpty) {
+      var spaces = ref.read(acpWorkspacesProvider).value ?? const <AcpWorkspace>[];
+      if (spaces.isEmpty) {
+        try {
+          spaces = await ref.read(acpWorkspacesProvider.future);
+        } on Object {
+          spaces = const <AcpWorkspace>[];
+        }
+      }
+      if (spaces.isNotEmpty) cwd = spaces.first.path;
+    }
+    cwd ??= conn.workingDirectory;
+    if (cwd == null || cwd.isEmpty) {
+      throw const DshRemoteException('ACP_WORKSPACE_UNAVAILABLE', '电脑上的 Claude 还没有可用工作区');
     }
     final created = await acp.createSession(cwd, backend);
     ref.invalidate(acpClaudeSessionsProvider);

@@ -11,7 +11,7 @@ import 'dart:async';
 
 import 'package:dsh_client/dsh_client.dart' show SessionProjections, SessionSummary;
 import 'package:dsh_remote/dsh_remote.dart'
-    show AcpSession, DshConnectionState, RemoteAcpClient, RemoteHostSession, RemoteTunnelCarrier;
+    show AcpSession, AcpWorkspace, DshConnectionState, RemoteAcpClient, RemoteHostSession, RemoteTunnelCarrier;
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
 import 'connection_state.dart' show HostConnection;
@@ -290,3 +290,26 @@ class NewChatBackendController extends Notifier<String?> {
 }
 
 final newChatBackendProvider = NotifierProvider<NewChatBackendController, String?>(NewChatBackendController.new);
+
+/// Claude（ACP）可用的工作区目录，供新对话选择落点。
+final acpWorkspacesProvider = FutureProvider.autoDispose<List<AcpWorkspace>>((ref) async {
+  final connection = ref.watch(readListLiveConnectionProvider);
+  final acp = acpClientFor(connection);
+  if (acp == null || !acp.backendAvailable('claude')) return const <AcpWorkspace>[];
+  try {
+    return List.unmodifiable(await acp.listWorkspaces('claude'));
+  } on Object {
+    return const <AcpWorkspace>[];
+  }
+});
+
+/// 新对话用哪个 ACP 工作区（绝对路径）；null = 还没选，交给默认值。
+class NewChatAcpWorkspaceController extends Notifier<String?> {
+  @override
+  String? build() => null;
+
+  void select(String? path) => state = path;
+}
+
+final newChatAcpWorkspaceProvider =
+    NotifierProvider<NewChatAcpWorkspaceController, String?>(NewChatAcpWorkspaceController.new);
